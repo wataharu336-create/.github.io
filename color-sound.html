@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>色音変換 Color ⇄ Sound</title>
+<style>
+:root{--bg:#f6f5f2;--fg:#1c1b19;--mut:#6b6860;--card:#fff;--line:#d9d6cf;--acc:#3b5bdb;--on:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141413;--fg:#efede8;--mut:#a09d94;--card:#1e1e1c;--line:#3a3935;--acc:#8ea2ff;--on:#10131f}}
+:root[data-theme="dark"]{--bg:#141413;--fg:#efede8;--mut:#a09d94;--card:#1e1e1c;--line:#3a3935;--acc:#8ea2ff;--on:#10131f}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif}
+main{max-width:720px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--mut);font-size:14px;margin:0 0 16px}
+.tabs{display:flex;gap:8px;margin-bottom:14px}
+button,select,.btn{font:inherit;font-size:15px;padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.on,button.pri{background:var(--acc);color:var(--on);border-color:var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+.wrap{position:relative;margin:10px 0}
+canvas{display:block;width:100%;height:auto;border-radius:10px;border:1px solid var(--line);touch-action:none;background:#000}
+.ph{position:absolute;top:0;bottom:0;left:0;width:2px;background:#fff;mix-blend-mode:difference;pointer-events:none}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.sw{width:32px;height:32px;border-radius:50%;border:2px solid var(--line);padding:0}
+input[type=color]{width:44px;height:36px;padding:0;border:1px solid var(--line);border-radius:8px;background:none}
+.out{font-variant-numeric:tabular-nums;font-size:14px;color:var(--mut);min-height:3.2em}
+.chip{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:-2px;margin-right:6px;border:1px solid var(--line)}
+details{margin-top:14px;font-size:14px;color:var(--mut)}
+details p{margin:6px 0}
+[hidden]{display:none!important}
+</style></head>
+<body><main>
+<h1>色 ⇄ 音 変換</h1>
+<p class="sub">光の周波数を2のべき乗で折りたたみ、可聴域の音とやり取りします。画像は左から右が時間の流れです。</p>
+<div class="tabs"><button id="t1" class="on">色 → 音</button><button id="t2">音 → 色</button></div>
+
+<section id="p1" class="card">
+ <div class="row"><input type="color" id="pick" value="#ff0000"><span id="sws" class="row" style="margin:0"></span></div>
+ <div class="wrap"><canvas id="cv" width="480" height="180"></canvas><div class="ph" id="ph1"></div></div>
+ <div class="row">
+  <button class="pri" id="play">▶ 再生</button>
+  <select id="dur"><option value="4">4秒</option><option value="8" selected>8秒</option><option value="16">16秒</option></select>
+  <button id="reset">初期化</button>
+  <label class="btn">画像を読み込む<input type="file" id="img" accept="image/*" hidden></label>
+ </div>
+ <div class="out" id="o1">画像をなぞって色を塗れます。縦方向は平均され、1列が1つの音になります。</div>
+</section>
+
+<section id="p2" class="card" hidden>
+ <div class="wrap"><canvas id="cv2" width="480" height="180"></canvas><div class="ph" id="ph2"></div></div>
+ <div class="row">
+  <button class="pri" id="mic">🎤 マイク開始</button>
+  <label class="btn">音声ファイル<input type="file" id="af" accept="audio/*" hidden></label>
+  <button id="stop2">■ 停止</button>
+ </div>
+ <div class="out" id="o2">マイクか音声ファイルを選ぶと、8秒で左から右へ色が描かれます。</div>
+</section>
+
+<details><summary>変換のしくみ</summary>
+<p>色相0〜270°を波長700〜400nmに対応させ、光の周波数 c/λ を2⁴⁰で割って音にします(赤≈390Hz、紫≈682Hz)。</p>
+<p>270〜360°のマゼンタは単一波長を持たないため、紫(682Hz)から赤の1オクターブ上(779Hz)までの音域に割り当てました。音のオクターブ循環と色相環がちょうど一致します。</p>
+<p>明度は音量に対応します。彩度は倍音の量に対応し、音→色ではスペクトルのピークの鋭さが彩度になります(ノイズは白っぽく表示)。</p>
+<p>音→色では、スペクトルの上位2つのピークを振幅で重み付けして混色します。</p>
+<p>iPhoneではマナーモードだとWeb音声が鳴らないことがあります。</p></details>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const C=299792458,SH=2**40,F_RED=C/700e-9/SH,F_VIO=C/400e-9/SH,F_TOP=F_RED*2;
+const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
+function hueToHz(h){h=((h%360)+360)%360;
+ if(h<=270)return C/((700-h/270*300)*1e-9)/SH;
+ return F_VIO*Math.pow(F_TOP/F_VIO,(h-270)/90)}
+function hzToHue(f){while(f<F_RED)f*=2;while(f>=F_TOP)f/=2;
+ if(f<=F_VIO)return(700-C/(f*SH)*1e9)/300*270;
+ return 270+90*Math.log(f/F_VIO)/Math.log(F_TOP/F_VIO)}
+function hsv2rgb(h,s,v){h=(((h%360)+360)%360)/60;const i=Math.floor(h),f=h-i,p=v*(1-s),q=v*(1-s*f),t=v*(1-s*(1-f));
+ return[[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i%6].map(x=>x*255)}
+function rgb2hsv(r,g,b){r/=255;g/=255;b/=255;const mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn;let h=0;
+ if(d){h=mx===r?((g-b)/d)%6:mx===g?(b-r)/d+2:(r-g)/d+4;h*=60;if(h<0)h+=360}
+ return[h,mx?d/mx:0,mx]}
+const hex=rgb=>'#'+rgb.map(x=>Math.round(clamp(x,0,255)).toString(16).padStart(2,'0')).join('');
+const NN=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const note=f=>{const n=Math.round(12*Math.log2(f/440)+69);return NN[(n%12+12)%12]+(Math.floor(n/12)-1)};
+const nmOf=f=>{const h=hzToHue(f);return h<=270?Math.round(700-h/270*300)+' nm':'マゼンタ域'};
+let ac;function actx(){if(!ac)ac=new(window.AudioContext||window.webkitAudioContext)();if(ac.state!=='running')ac.resume();return ac}
+
+function tab(n){stopPlay();stopSound();$('p1').hidden=n!==1;$('p2').hidden=n!==2;$('t1').classList.toggle('on',n===1);$('t2').classList.toggle('on',n===2)}
+$('t1').onclick=()=>tab(1);$('t2').onclick=()=>tab(2);
+
+/* ===== 色 → 音 ===== */
+const cv=$('cv'),cx=cv.getContext('2d',{willReadFrequently:true}),W=cv.width,H=cv.height;
+function init(){const g=cx.createLinearGradient(0,0,W,0);for(let i=0;i<=36;i++)g.addColorStop(i/36,'hsl('+i*10+',100%,50%)');
+ cx.fillStyle=g;cx.fillRect(0,0,W,H);const v=cx.createLinearGradient(0,0,0,H);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,.8)');cx.fillStyle=v;cx.fillRect(0,0,W,H)}
+init();
+[0,60,120,180,240,270,315].forEach(h=>{const b=document.createElement('button'),c=hex(hsv2rgb(h,1,1));b.className='sw';b.style.background=c;b.onclick=()=>$('pick').value=c;$('sws').appendChild(b)});
+{const b=document.createElement('button');b.className='sw';b.style.background='#000';b.title='黒(無音)';b.onclick=()=>$('pick').value='#000000';$('sws').appendChild(b)}
+let pd=false,lp=null;
+const pos=e=>{const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*W/r.width,(e.clientY-r.top)*H/r.height]};
+function dot(a,b){cx.strokeStyle=$('pick').value;cx.lineWidth=22;cx.lineCap='round';cx.beginPath();cx.moveTo(a[0],a[1]);cx.lineTo(b[0]+.01,b[1]);cx.stroke()}
+cv.onpointerdown=e=>{pd=true;lp=pos(e);cv.setPointerCapture(e.pointerId);dot(lp,lp)};
+cv.onpointermove=e=>{if(!pd)return;const p=pos(e);dot(lp,p);lp=p};
+cv.onpointerup=cv.onpointercancel=()=>{pd=false};
+$('reset').onclick=init;
+$('img').onchange=e=>{const f=e.target.files[0];if(!f)return;const im=new Image();im.onload=()=>{cx.drawImage(im,0,0,W,H);URL.revokeObjectURL(im.src)};im.src=URL.createObjectURL(f);e.target.value=''};
+
+function column(i,N){const x0=Math.floor(i*W/N),x1=Math.max(x0+1,Math.floor((i+1)*W/N));
+ const d=cx.getImageData(x0,0,x1-x0,H).data;let sx=0,sy=0,sv=0,ss=0,n=0;
+ for(let k=0;k<d.length;k+=4){const q=rgb2hsv(d[k],d[k+1],d[k+2]),w=q[1]*q[2],r=q[0]*Math.PI/180;sx+=w*Math.cos(r);sy+=w*Math.sin(r);sv+=q[2];ss+=q[1]*q[2];n++}
+ const h=(Math.atan2(sy,sx)*180/Math.PI+360)%360;
+ return{h,v:sv/n,s:sv?ss/sv:0,f:hueToHz(h)}}
+
+let pl=null;
+function stopPlay(){if(!pl)return;cancelAnimationFrame(pl.raf);try{pl.m.gain.cancelScheduledValues(0);pl.m.gain.setTargetAtTime(0,ac.currentTime,.02);pl.o1.stop(ac.currentTime+.1);pl.o2.stop(ac.currentTime+.1)}catch(e){}
+ pl=null;$('play').textContent='▶ 再生';$('ph1').style.left='0'}
+$('play').onclick=()=>{if(pl){stopPlay();return}
+ const a=actx(),N=96,dur=+$('dur').value,st=[];for(let i=0;i<N;i++)st.push(column(i,N));
+ const o1=a.createOscillator(),o2=a.createOscillator(),g2=a.createGain(),m=a.createGain();
+ o1.connect(m);o2.connect(g2);g2.connect(m);m.connect(a.destination);m.gain.value=0;
+ const t0=a.currentTime+.1;
+ st.forEach((c,i)=>{const t=t0+i*dur/N;
+  if(i===0){o1.frequency.setValueAtTime(c.f,t);o2.frequency.setValueAtTime(c.f*2,t)}
+  else{o1.frequency.setTargetAtTime(c.f,t,.02);o2.frequency.setTargetAtTime(c.f*2,t,.02)}
+  m.gain.setTargetAtTime(c.v*.35,t,.02);g2.gain.setTargetAtTime(c.s*.5,t,.02)});
+ m.gain.setTargetAtTime(0,t0+dur,.03);o1.start(t0);o2.start(t0);o1.stop(t0+dur+.3);o2.stop(t0+dur+.3);
+ pl={o1,o2,m,raf:0};$('play').textContent='■ 停止';
+ const loop=()=>{if(!pl)return;const p=(a.currentTime-t0)/dur;
+  if(p>=1){stopPlay();$('o1').textContent='再生終了';return}
+  const q=clamp(p,0,.9999);$('ph1').style.left=q*100+'%';const c=st[Math.floor(q*N)];
+  $('o1').innerHTML='<span class="chip" style="background:'+hex(hsv2rgb(c.h,c.s,1))+'"></span>'+Math.round(c.f)+' Hz('+note(c.f)+') / '+nmOf(c.f)+' / 音量 '+Math.round(c.v*100)+'%';
+  pl.raf=requestAnimationFrame(loop)};loop()};
+
+/* ===== 音 → 色 ===== */
+const c2=$('cv2'),x2=c2.getContext('2d'),N2=96;
+x2.fillStyle='#000';x2.fillRect(0,0,W,H);
+let an,fb,tb,run=null;
+function setup(){const a=actx();if(!an){an=a.createAnalyser();an.fftSize=8192;an.smoothingTimeConstant=.5;
+ const z=a.createGain();z.gain.value=0;an.connect(z);z.connect(a.destination);
+ fb=new Float32Array(an.frequencyBinCount);tb=new Float32Array(an.fftSize)}return a}
+function analyse(a){an.getFloatTimeDomainData(tb);let e=0;for(let i=0;i<tb.length;i++)e+=tb[i]*tb[i];
+ const vol=clamp((20*Math.log10(Math.sqrt(e/tb.length)+1e-9)+60)/45,0,1);
+ an.getFloatFrequencyData(fb);for(let i=0;i<fb.length;i++)fb[i]=Math.max(fb[i],-140);
+ const bw=a.sampleRate/an.fftSize,lo=Math.max(2,Math.floor(80/bw)),hi=Math.min(fb.length-2,Math.ceil(3000/bw));
+ let i1=lo,sum=0;for(let i=lo;i<=hi;i++){sum+=fb[i];if(fb[i]>fb[i1])i1=i}
+ const mean=sum/(hi-lo+1);
+ const pk=i=>{const d=fb[i-1]-2*fb[i]+fb[i+1];return(i+(d?clamp(.5*(fb[i-1]-fb[i+1])/d,-.5,.5):0))*bw};
+ const f1=pk(i1),pks=[{f:f1,db:fb[i1]}];let i2=-1;
+ for(let i=lo;i<=hi;i++){if(Math.abs(i*bw-f1)<Math.max(3*bw,.06*f1))continue;
+  if(fb[i]>=fb[i-1]&&fb[i]>=fb[i+1]&&(i2<0||fb[i]>fb[i2]))i2=i}
+ if(i2>0&&fb[i2]>fb[i1]-30)pks.push({f:pk(i2),db:fb[i2]});
+ return{vol,pks,sat:clamp((fb[i1]-mean-8)/25,.15,1)}}
+function mix(r){if(r.vol<.03)return{rgb:[0,0,0],cols:[]};
+ const w=r.pks.map(p=>Math.pow(10,(p.db-r.pks[0].db)/20)),ws=w.reduce((a,b)=>a+b);
+ const cols=r.pks.map(p=>hsv2rgb(hzToHue(p.f),1,1));
+ const m=[0,1,2].map(j=>cols.reduce((s,c,k)=>s+c[j]*w[k],0)/ws),q=rgb2hsv(m[0],m[1],m[2]);
+ return{rgb:hsv2rgb(q[0],q[1]*r.sat,r.vol),cols}}
+function fillCol(k,rgb){x2.fillStyle='rgb('+rgb.map(Math.round)+')';x2.fillRect(Math.floor(k*W/N2),0,Math.ceil(W/N2)+1,H)}
+function readout(r,m){const o=$('o2');if(!m.cols.length){o.textContent='待機中(音を出してください)';return}
+ o.innerHTML=r.pks.map((p,i)=>'<span class="chip" style="background:'+hex(m.cols[i])+'"></span>'+Math.round(p.f)+' Hz('+note(p.f)+') / '+nmOf(p.f)).join('<br>')
+ +'<br><span class="chip" style="background:'+hex(m.rgb)+'"></span>混色結果 / 音量 '+Math.round(r.vol*100)+'%'}
+function begin(node,hear,cleanup){const a=setup();x2.fillStyle='#000';x2.fillRect(0,0,W,H);
+ node.connect(an);if(hear)node.connect(a.destination);
+ run={node,cleanup,t0:performance.now(),last:-1,raf:0};const dur=8000;
+ const loop=()=>{if(!run)return;const r=analyse(a),m=mix(r);
+  const idx=Math.floor(((performance.now()-run.t0)%dur)/dur*N2);let k=run.last<0?idx:run.last;
+  for(;;){fillCol(k,m.rgb);if(k===idx)break;k=(k+1)%N2}
+  run.last=idx;$('ph2').style.left=(idx+1)/N2*100+'%';readout(r,m);run.raf=requestAnimationFrame(loop)};loop()}
+function stopSound(){if(!run)return;cancelAnimationFrame(run.raf);try{run.node.disconnect();run.cleanup&&run.cleanup()}catch(e){}run=null;$('ph2').style.left='0'}
+$('stop2').onclick=stopSound;
+$('mic').onclick=async()=>{stopSound();const a=setup();let s;
+ try{s=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})}
+ catch(e){$('o2').textContent='マイクを使えませんでした。許可設定を確認するか、ページを単独のタブで開いてください。音声ファイルでも試せます。';return}
+ begin(a.createMediaStreamSource(s),false,()=>s.getTracks().forEach(t=>t.stop()))};
+$('af').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;stopSound();const a=setup();
+ try{const buf=await a.decodeAudioData(await f.arrayBuffer()),n=a.createBufferSource();n.buffer=buf;
+  n.onended=()=>{if(run&&run.node===n)stopSound()};
+  begin(n,true,()=>{try{n.stop()}catch(_){}});n.start()}
+ catch(err){$('o2').textContent='音声ファイルを読み込めませんでした。'}};
+</script></body></html>
